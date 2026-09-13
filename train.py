@@ -18,23 +18,23 @@ class ShardedDataset(Dataset):
         assert shards, f"No {split} shards found in {data_dir}"
 
         self.context_len = context_len
-        self.mmaps   = [np.memmap(s, dtype=np.uint16, mode="r") for s in shards]
-        self.lengths = [max(0, len(m) - context_len) for m in self.mmaps]
-        self.cumlen  = np.cumsum([0] + self.lengths)
-        self.total   = int(self.cumlen[-1])
+        self.mmaps   = [np.memmap(s, dtype=np.uint16, mode="r") for s in shards] # memory-map the shards (fast, doesn't load into RAM)
+        self.lengths = [max(0, len(m) - context_len) for m in self.mmaps] # number of full context windows in each shard
+        self.cumlen  = np.cumsum([0] + self.lengths) # cumulative lengths to find shard boundaries
+        self.total   = int(self.cumlen[-1]) # total number of windows across all shards
 
         print(f"  {split.upper()} Dataset: {len(shards)} shards | "
               f"{sum(len(m) for m in self.mmaps):,} tokens | "
               f"{self.total:,} windows")
 
-    def __len__(self): return self.total
+    def __len__(self): return self.total # total number of context windows across all shards
 
     def __getitem__(self, idx):
-        shard = int(np.searchsorted(self.cumlen[1:], idx, side="right"))
-        local = idx - int(self.cumlen[shard])
-        chunk = self.mmaps[shard][local : local + self.context_len + 1]
-        chunk = torch.from_numpy(chunk.astype(np.int64))
-        return chunk[:-1], chunk[1:]
+        shard = int(np.searchsorted(self.cumlen[1:], idx, side="right")) # find which shard the index falls into
+        local = idx - int(self.cumlen[shard]) # index within the shard
+        chunk = self.mmaps[shard][local : local + self.context_len + 1] # +1 for target token
+        chunk = torch.from_numpy(chunk.astype(np.int64)) # convert to PyTorch tensor
+        return chunk[:-1], chunk[1:] # input tokens and target tokens (next token prediction)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,12 +132,12 @@ def main():
         print(f"{'='*60}\n")
 
     # ── Dataset + DataLoader ──────────────────────────────────────────────────
-        train_dataset = ShardedDataset(cfg.data_dir, cfg.context_len, split="train")
+        train_dataset = ShardedDataset(cfg.data_dir, cfg.context_len, split="train") # create training dataset from sharded binary files (memory-mapped for efficiency)
         val_dataset   = ShardedDataset(cfg.data_dir, cfg.context_len, split="val")
 
         train_sampler = DistributedSampler(train_dataset, world_size, rank, shuffle=True) if ddp else None
 
-        train_loader = DataLoader(
+        train_loader = DataLoader( # Batches and parallelizes data loading to feed data efficiently to GPU during training.
             train_dataset,
             batch_size=cfg.batch_size,
             sampler=train_sampler,
@@ -146,7 +146,7 @@ def main():
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-        )
+        ) 
 
         val_loader = DataLoader(
             val_dataset,
@@ -190,18 +190,18 @@ def main():
             g["lr"] = lr
 
         # Gradient accumulation
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad(set_to_none=True) # reset gradients to zero (set_to_none=True is more efficient than zeroing out tensors)
         loss_accum = 0.0
 
         for micro in range(cfg.grad_accum):
             try:
-                x, y = next(loader_iter)
+                x, y = next(loader_iter) # get next batch of data; if we exhaust the DataLoader, we catch the StopIteration exception to reset the iterator and start a new epoch
             except StopIteration:
                 if ddp and sampler: sampler.set_epoch(step)
                 loader_iter = iter(train_loader)
                 x, y = next(loader_iter)
 
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True) # move data to GPU asynchronously (non_blocking=True allows overlapping data transfer with computation)
 
             # Sync grads only on last micro-step (DDP optimization)
             sync_ctx = model.no_sync() if (ddp and micro < cfg.grad_accum - 1) \
