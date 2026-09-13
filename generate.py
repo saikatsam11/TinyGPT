@@ -62,7 +62,6 @@ def generate(model, tokenizer, prompt: str, cfg: ModelConfig, device: str,
 
     token_ids = [t for t in out[0].tolist() if t not in (bos_id, eos_id)]
 
-    # ✅ FIXED DECODING
     text = tokenizer.decode(token_ids)
 
     return text.strip()

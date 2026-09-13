@@ -10,8 +10,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from tokenizers import Tokenizer
 
-from Model.config import ModelConfig
-from Model.gpt import GPT
+from config import ModelConfig
+from gpt import GPT
 
 
 # ── Fine-tune hyperparameters ────────────────────────────────────────────────
@@ -21,8 +21,8 @@ TOKENIZER_PATH  = "tokenizer/tokenizer.json"
 CKPT_DIR        = "checkpoints_ft"
 
 BATCH_SIZE   = 16
-GRAD_ACCUM   = 2
-LR           = 6e-5
+GRAD_ACCUM   = 2        # effective batch = 32 sequences
+LR           = 6e-5    # lower lr for more careful fine-tuning
 WEIGHT_DECAY = 0.1
 GRAD_CLIP    = 1.0
 WARMUP_STEPS = 100
@@ -197,20 +197,7 @@ def main():
     if os.path.exists(PRETRAINED_CKPT):
         ckpt  = torch.load(PRETRAINED_CKPT, map_location=device)
         state = ckpt.get("model", ckpt)
-        # Drop causal masks — they are fixed buffers, not learned weights.
-        # They get recreated at the correct size when the model is built.
-        state = {k: v for k, v in state.items() if not k.endswith(".attn.mask")}
-
-        # Handle context_len mismatch: extend positional embeddings if needed
-        ckpt_pos = state.get("transformer.pos_emb.weight")
-        if ckpt_pos is not None and ckpt_pos.shape[0] != cfg.context_len:
-            old_len = ckpt_pos.shape[0]
-            new_pos = model.transformer.pos_emb.weight.data.clone()
-            new_pos[:old_len] = ckpt_pos          # copy known positions
-            state["transformer.pos_emb.weight"] = new_pos
-            print(f"  Positional embeddings extended: {old_len} -> {cfg.context_len}")
-
-        model.load_state_dict(state, strict=False)
+        model.load_state_dict(state, strict=True)
         print(f"Loaded pretrained weights <- {PRETRAINED_CKPT}")
     else:
         print(f"WARNING: {PRETRAINED_CKPT} not found — fine-tuning from random init")

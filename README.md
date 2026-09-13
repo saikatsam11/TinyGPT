@@ -43,17 +43,18 @@ NVIDIA RTX 4060 Ti GPU in under 3 hours.
 ```
 InstructStoryLM/
 ├── model/
-│   ├── gpt.py              # GPT model architecture
-│   └── config.py           # ModelConfig dataclass
+│   ├── gpt.py                # GPT model architecture
+│   └── config.py             # ModelConfig dataclass
 ├── tokenizer/
-│   └── tokenizer.json      # Trained BPE tokenizer
+│   └── tokenizer.json        # Trained BPE tokenizer
 ├── data/
-│   └── setup_data.py       # Download + tokenize + shard dataset
-├── train.py                # Pretraining script
-├── finetune.py             # Instruction fine-tuning script
-├── generate.py             # Story generation (pretrained model)
-├── finetune_inference.py   # Instruction-based generation
-├── evaluate.py             # Full evaluation pipeline
+│   └── setup_data.py         # Download + tokenize + shard dataset
+├── train.py                  # Pretraining script
+├── final_data_cleaned.jsonl  # finetune dataset
+├── finetune.py               # Instruction fine-tuning script
+├── generate.py               # Story generation (pretrained model)
+├── finetune_inference.py     # Instruction-based generation
+├── evaluate.py               # Full evaluation pipeline
 ├── requirements.txt
 └── README.md
 ```
@@ -100,17 +101,6 @@ python train.py
 ```
 
 ### Instruction Fine-tuning
-
-> ⚠️ **Important:** Before running `finetune.py`, update `model/config.py`:
-> ```python
-> # Change this:
-> context_len : int = 256
-> 
-> # To this:
-> context_len : int = 512
-> ```
-> This is required because instruction-response pairs are longer
-> than pretraining sequences and need a larger context window.
 
 ```bash
 python finetune.py
