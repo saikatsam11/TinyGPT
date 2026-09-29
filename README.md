@@ -1,4 +1,4 @@
-# InstructStoryLM — Lightweight Instruction-Tuned Story Generator
+# TinyGPT — Lightweight Instruction-Tuned Story Generator
 
 A compact 31.3M parameter GPT-style language model trained from 
 scratch for children's story generation, with instruction fine-tuning 
