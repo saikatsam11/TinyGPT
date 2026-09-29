@@ -14,40 +14,40 @@ from Model.gpt    import GPT
 # ─────────────────────────────────────────────────────────────────────────────
 class ShardedDataset(Dataset):
     def __init__(self, data_dir, context_len, split="train"):
-        shards = sorted(glob.glob(os.path.join(data_dir, f"{split}_shard_*.bin")))
-        assert shards, f"No {split} shards found in {data_dir}"
+        shards = sorted(glob.glob(os.path.join(data_dir, f"{split}_shard_*.bin"))) #finds all .bin files matching with patten like train_shard_0000.bin with sorting 
+        assert shards, f"No {split} shards found in {data_dir}" #if no files found then crashes with a clear error
 
-        self.context_len = context_len
-        self.mmaps   = [np.memmap(s, dtype=np.uint16, mode="r") for s in shards] # memory-map the shards (fast, doesn't load into RAM)
-        self.lengths = [max(0, len(m) - context_len) for m in self.mmaps] # number of full context windows in each shard
-        self.cumlen  = np.cumsum([0] + self.lengths) # cumulative lengths to find shard boundaries
-        self.total   = int(self.cumlen[-1]) # total number of windows across all shards
+        self.context_len = context_len # context length e.g 256 or 512
+        self.mmaps   = [np.memmap(s, dtype=np.uint16, mode="r") for s in shards] #Memory maps each shard file, does not load the shard files in the ram
+        self.lengths = [max(0, len(m) - context_len) for m in self.mmaps] #valid windows shards can produce, e.g shards_token - context_len
+        self.cumlen  = np.cumsum([0] + self.lengths) # cumulative sum of lengths
+        self.total   = int(self.cumlen[-1]) #total number of windows e.g [0,744,1564,..]
 
         print(f"  {split.upper()} Dataset: {len(shards)} shards | "
               f"{sum(len(m) for m in self.mmaps):,} tokens | "
               f"{self.total:,} windows")
 
-    def __len__(self): return self.total # total number of context windows across all shards
+    def __len__(self): return self.total
 
-    def __getitem__(self, idx):
-        shard = int(np.searchsorted(self.cumlen[1:], idx, side="right")) # find which shard the index falls into
-        local = idx - int(self.cumlen[shard]) # index within the shard
-        chunk = self.mmaps[shard][local : local + self.context_len + 1] # +1 for target token
-        chunk = torch.from_numpy(chunk.astype(np.int64)) # convert to PyTorch tensor
-        return chunk[:-1], chunk[1:] # input tokens and target tokens (next token prediction)
+    def __getitem__(self, idx): #fetching one training example
+        shard = int(np.searchsorted(self.cumlen[1:], idx, side="right")) #find which shard the global idx class into binary search
+        local = idx - int(self.cumlen[shard]) #converts global index to local index
+        chunk = self.mmaps[shard][local : local + self.context_len + 1] #reads context_len + 1 token from local position, +1 for the target
+        chunk = torch.from_numpy(chunk.astype(np.int64)) #converting it PyTorch tensor
+        return chunk[:-1], chunk[1:] # return target and input
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LR schedule
 # ─────────────────────────────────────────────────────────────────────────────
-def get_lr(step, cfg):
-    min_lr = cfg.lr * 0.1
-    if step < cfg.warmup_steps:
-        return cfg.lr * (step + 1) / cfg.warmup_steps
-    if step >= cfg.max_steps:
-        return min_lr
-    progress = (step - cfg.warmup_steps) / (cfg.max_steps - cfg.warmup_steps)
-    return min_lr + 0.5 * (1.0 + math.cos(math.pi * progress)) * (cfg.lr - min_lr)
+def get_lr(step, cfg): #cosine learning rate schedule
+    min_lr = cfg.lr * 0.1 #setting minimum learning rate to 10% of predefined learning rate, prevent learning rate from reaching zero
+    if step < cfg.warmup_steps: #learning rate linear warmup (steps 0 tp 199)
+        return cfg.lr * (step + 1) / cfg.warmup_steps # e.g 6e-4 x 1/200 = 3e-6 
+    if step >= cfg.max_steps: #safety check if step crosses predefined steps 
+        return min_lr # then strictly follow min_lr
+    progress = (step - cfg.warmup_steps) / (cfg.max_steps - cfg.warmup_steps) # cheking the decay phase e.g for 200th step, it is 0
+    return min_lr + 0.5 * (1.0 + math.cos(math.pi * progress)) * (cfg.lr - min_lr) #keeping the learning rate as cosine schedule
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,17 +55,16 @@ def get_lr(step, cfg):
 # ─────────────────────────────────────────────────────────────────────────────
 def save_ckpt(model, optimizer, step, val_loss, cfg, tag):
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
-    raw  = model.module if isinstance(model, DDP) else model
-    # If compiled, get the original module
+    raw  = model.module if isinstance(model, DDP) else model #for multiple gpu
     raw  = getattr(raw, "_orig_mod", raw)
     path = os.path.join(cfg.ckpt_dir, f"ckpt_{tag}.pt")
-    torch.save({"step": step, "model": raw.state_dict(),
+    torch.save({"step": step, "model": raw.state_dict(), #reads weights and save to local
                 "optimizer": optimizer.state_dict(),
                 "val_loss": val_loss, "config": cfg.__dict__}, path)
     print(f"  Saved → {path}  (step={step}  val_loss={val_loss:.4f})")
 
 
-def load_ckpt(path, model, optimizer, device):
+def load_ckpt(path, model, optimizer, device): #loading the saved model as ckpt.pt
     ckpt = torch.load(path, map_location=device)
     raw  = model.module if isinstance(model, DDP) else model
     raw  = getattr(raw, "_orig_mod", raw)
@@ -82,14 +81,14 @@ def load_ckpt(path, model, optimizer, device):
 def validate(model, loader, device, max_batches=100):
     model.eval()
     total, n = 0.0, 0
-    for i, (x, y) in enumerate(loader):
+    for i, (x, y) in enumerate(loader): #loops through validation batches
         if i >= max_batches: break
         x, y = x.to(device), y.to(device)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             _, loss = model(x, y)
         total += loss.item(); n += 1
     model.train()
-    return total / max(n, 1)
+    return total / max(n, 1) #average loss accross batches
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,7 +98,7 @@ def main():
     cfg = ModelConfig()
 
     # ── DDP ──────────────────────────────────────────────────────────────────
-    ddp        = int(os.environ.get("RANK", -1)) != -1
+    ddp        = int(os.environ.get("RANK", -1)) != -1 #checking the count of the gpu
     rank       = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     if ddp:
@@ -111,9 +110,8 @@ def main():
     device = f"cuda:{rank}" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(42 + rank)
 
-    # ── 4060 Ti specific: enable TF32 for matrix ops ──────────────────────────
-    # TF32 keeps full range but reduces precision slightly — big speedup on Ada
-    torch.backends.cuda.matmul.allow_tf32 = True
+    #enabling Tensorfloat-32 precision
+    torch.backends.cuda.matmul.allow_tf32 = True #enabling Tensorfloat-32 precision
     torch.backends.cudnn.allow_tf32       = True
 
     if master:
@@ -132,12 +130,16 @@ def main():
         print(f"{'='*60}\n")
 
     # ── Dataset + DataLoader ──────────────────────────────────────────────────
-        train_dataset = ShardedDataset(cfg.data_dir, cfg.context_len, split="train") # create training dataset from sharded binary files (memory-mapped for efficiency)
+
+        #loading memory mapped .bin shards
+        train_dataset = ShardedDataset(cfg.data_dir, cfg.context_len, split="train")
         val_dataset   = ShardedDataset(cfg.data_dir, cfg.context_len, split="val")
 
+        #for multiple gpu
         train_sampler = DistributedSampler(train_dataset, world_size, rank, shuffle=True) if ddp else None
 
-        train_loader = DataLoader( # Batches and parallelizes data loading to feed data efficiently to GPU during training.
+        # training dataloader
+        train_loader = DataLoader(
             train_dataset,
             batch_size=cfg.batch_size,
             sampler=train_sampler,
@@ -146,8 +148,9 @@ def main():
             pin_memory=True,
             persistent_workers=True,
             drop_last=True,
-        ) 
+        )
 
+        # validation dataloader
         val_loader = DataLoader(
             val_dataset,
             batch_size=cfg.batch_size,
@@ -160,7 +163,7 @@ def main():
     model     = GPT(cfg).to(device)
     optimizer = model.configure_optimizer(cfg)
 
-    # torch.compile — significant speedup on 4060 Ti (Ada Lovelace, sm_89)
+    
     if cfg.compile_model and hasattr(torch, "compile"):
         if master: print("  Compiling model with torch.compile() ...")
         model = torch.compile(model)
@@ -170,9 +173,9 @@ def main():
         model = DDP(model, device_ids=[rank])
 
     # ── Resume ────────────────────────────────────────────────────────────────
-    start_step, best_val = 0, float("inf")
-    latest = os.path.join(cfg.ckpt_dir, "ckpt_latest.pt")
-    if os.path.exists(latest):
+    start_step, best_val = 0, float("inf")  #default starting step as 0 and best_val 'inf'
+    latest = os.path.join(cfg.ckpt_dir, "ckpt_latest.pt") 
+    if os.path.exists(latest): #if lastest ckpt is present then resume from that steps
         start_step, best_val = load_ckpt(latest, model, optimizer, device)
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -190,18 +193,19 @@ def main():
             g["lr"] = lr
 
         # Gradient accumulation
-        optimizer.zero_grad(set_to_none=True) # reset gradients to zero (set_to_none=True is more efficient than zeroing out tensors)
+        optimizer.zero_grad(set_to_none=True) #clear gradients from previous steps
         loss_accum = 0.0
 
+        #a
         for micro in range(cfg.grad_accum):
             try:
-                x, y = next(loader_iter) # get next batch of data; if we exhaust the DataLoader, we catch the StopIteration exception to reset the iterator and start a new epoch
+                x, y = next(loader_iter)
             except StopIteration:
                 if ddp and sampler: sampler.set_epoch(step)
                 loader_iter = iter(train_loader)
                 x, y = next(loader_iter)
 
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True) # move data to GPU asynchronously (non_blocking=True allows overlapping data transfer with computation)
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
 
             # Sync grads only on last micro-step (DDP optimization)
             sync_ctx = model.no_sync() if (ddp and micro < cfg.grad_accum - 1) \
